@@ -1,6 +1,7 @@
 const Timer = require('../util/timer');
 const Thread = require('./thread');
 const execute = require('./execute.js');
+const compilerExecute = require('../compiler/jsexecute');
 
 /**
  * Profiler frame name for stepping a single thread.
@@ -160,6 +161,7 @@ class Sequencer {
                         this.runtime.threads[nextActiveThread] = thread;
                         nextActiveThread++;
                     } else {
+                        this.runtime.threadMap.delete(thread.getId());
                         doneThreads.push(thread);
                     }
                 }
@@ -177,6 +179,11 @@ class Sequencer {
      * @param {!Thread} thread Thread object to step.
      */
     stepThread (thread) {
+        if (thread.isCompiled) {
+            compilerExecute(thread);
+            return;
+        }
+
         let currentBlockId = thread.peekStack();
         if (!currentBlockId) {
             // A "null block" - empty branch.
@@ -190,6 +197,7 @@ class Sequencer {
         }
         // Save the current block ID to notice if we did control flow.
         while ((currentBlockId = thread.peekStack())) {
+            const initialStackSize = thread.stack.length;
             let isWarpMode = thread.peekStackFrame().warpMode;
             if (isWarpMode && !thread.warpTimer) {
                 // Initialize warp-mode timer if it hasn't been already.
@@ -230,9 +238,16 @@ class Sequencer {
             } else if (thread.status === Thread.STATUS_YIELD_TICK) {
                 // stepThreads will reset the thread to Thread.STATUS_RUNNING
                 return;
+            } else if (thread.status === Thread.STATUS_DONE) {
+                // Nothing more to execute.
+                return;
             }
             // If no control flow has happened, switch to next block.
-            if (thread.peekStack() === currentBlockId) {
+            if (
+                thread.stack.length === initialStackSize &&
+                thread.peekStack() === currentBlockId &&
+                !thread.peekStackFrame().waitingReporter
+            ) {
                 thread.goToNextBlock();
             }
             // If no next block has been found at this point, look on the stack.
@@ -355,6 +370,10 @@ class Sequencer {
         thread.stackFrame = [];
         thread.requestScriptGlowInFrame = false;
         thread.status = Thread.STATUS_DONE;
+        if (thread.isCompiled) {
+            thread.procedures = null;
+            thread.generator = null;
+        }
     }
 }
 

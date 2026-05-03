@@ -81,7 +81,24 @@ class Blocks {
              * A cache of hat opcodes to collection of theads to execute.
              * @type {object.<string, object>}
              */
-            scripts: {}
+            scripts: {},
+
+            /**
+             * tw: A cache of top block (usually hat, but not always) opcodes to compiled scripts.
+             * @type {object.<string, object>}
+             */
+            compiledScripts: {},
+            
+            /**
+             * tw: A cache of procedure code opcodes to a parsed intermediate representation
+             * @type {object.<string, object>}
+             */
+            compiledProcedures: {},
+
+            /**
+             * tw: Whether populateProcedureCache has been run
+             */
+            proceduresPopulated: false
         };
 
         /**
@@ -94,6 +111,42 @@ class Blocks {
          * @type {boolean}
          */
         this.forceNoGlow = optNoGlow || false;
+    }
+
+    /**
+     * Get the cached compilation result of a block.
+     * @param {string} blockId ID of the top block.
+     * @returns {{success: boolean; value: any}|null} Cached success or error, or null if there is no cached value.
+     */
+    getCachedCompileResult (blockId) {
+        if (Object.prototype.hasOwnProperty.call(this._cache.compiledScripts, blockId)) {
+            return this._cache.compiledScripts[blockId];
+        }
+        return null;
+    }
+
+    /**
+     * Set the cached compilation result of a script.
+     * @param {string} blockId ID of the top block.
+     * @param {*} value The compilation result to store.
+     */
+    cacheCompileResult (blockId, value) {
+        this._cache.compiledScripts[blockId] = {
+            success: true,
+            value: value
+        };
+    }
+
+    /**
+     * Set the cached error of a script.
+     * @param {string} blockId ID of the top block.
+     * @param {*} error The error to store.
+     */
+    cacheCompileError (blockId, error) {
+        this._cache.compiledScripts[blockId] = {
+            success: false,
+            value: error
+        };
     }
 
     /**
@@ -271,6 +324,7 @@ class Blocks {
             const block = this._blocks[id];
             if (block.opcode === 'procedures_prototype' &&
                 block.mutation.proccode === name) {
+                // tw: make sure that populateProcedureCache is kept up to date with this method
                 const names = JSON.parse(block.mutation.argumentnames);
                 const ids = JSON.parse(block.mutation.argumentids);
                 const defaults = JSON.parse(block.mutation.argumentdefaults);
@@ -282,6 +336,43 @@ class Blocks {
 
         this._cache.procedureParamNames[name] = null;
         return null;
+    }
+
+    /**
+     * tw: Setup the procedureParamNames and procedureDefinitions caches all at once.
+     * This makes subsequent calls to these methods faster.
+     */
+    populateProcedureCache () {
+        if (this._cache.proceduresPopulated) {
+            return;
+        }
+        for (const id in this._blocks) {
+            if (!Object.prototype.hasOwnProperty.call(this._blocks, id)) continue;
+            const block = this._blocks[id];
+
+            if (block.opcode === 'procedures_prototype') {
+                const name = block.mutation.proccode;
+                if (!this._cache.procedureParamNames[name]) {
+                    const names = JSON.parse(block.mutation.argumentnames);
+                    const ids = JSON.parse(block.mutation.argumentids);
+                    const defaults = JSON.parse(block.mutation.argumentdefaults);
+                    this._cache.procedureParamNames[name] = [names, ids, defaults];
+                }
+                continue;
+            }
+
+            if (block.opcode === 'procedures_definition') {
+                const internal = this._getCustomBlockInternal(block);
+                if (internal) {
+                    const name = internal.mutation.proccode;
+                    if (!this._cache.procedureDefinitions[name]) {
+                        this._cache.procedureDefinitions[name] = id;
+                    }
+                    continue;
+                }
+            }
+        }
+        this._cache.proceduresPopulated = true;
     }
 
     duplicate () {
@@ -376,6 +467,7 @@ class Blocks {
             this.deleteBlock(e.blockId);
             break;
         case 'var_create':
+            this.resetCache(); // tw: more aggressive cache resetting
             // Check if the variable being created is global or local
             // If local, create a local var on the current editing target, as long
             // as there are no conflicts, and the current target is actually a sprite
@@ -424,6 +516,7 @@ class Blocks {
             this.emitProjectChanged();
             break;
         case 'var_delete': {
+            this.resetCache(); // tw: more aggressive cache resetting
             const target = (editingTarget && Object.prototype.hasOwnProperty.call(editingTarget.variables, e.varId)) ?
                 editingTarget : stage;
             target.deleteVariable(e.varId);
@@ -432,6 +525,7 @@ class Blocks {
         }
         case 'block_comment_create':
         case 'comment_create':
+            this.resetCache(); // tw: comments can affect compilation
             if (this.runtime.getEditingTarget()) {
                 const currTarget = this.runtime.getEditingTarget();
                 currTarget.createComment(e.commentId, e.blockId, '',
@@ -453,6 +547,7 @@ class Blocks {
             break;
         case 'block_comment_change':
         case 'comment_change':
+            this.resetCache(); // tw: comments can affect compilation
             if (this.runtime.getEditingTarget()) {
                 const currTarget = this.runtime.getEditingTarget();
                 if (!Object.prototype.hasOwnProperty.call(currTarget.comments, e.commentId)) {
@@ -525,6 +620,7 @@ class Blocks {
             break;
         case 'block_comment_delete':
         case 'comment_delete':
+            this.resetCache(); // tw: comments can affect compilation
             if (this.runtime.getEditingTarget()) {
                 const currTarget = this.runtime.getEditingTarget();
                 if (!Object.prototype.hasOwnProperty.call(currTarget.comments, e.commentId)) {
@@ -571,6 +667,9 @@ class Blocks {
         this._cache._executeCached = {};
         this._cache._monitored = null;
         this._cache.scripts = {};
+        this._cache.compiledScripts = {};
+        this._cache.compiledProcedures = {};
+        this._cache.proceduresPopulated = false;
     }
 
     /**
@@ -1027,6 +1126,7 @@ class Blocks {
                 assetField.value = newName;
             }
         }
+        this.resetCache();
     }
 
     /**

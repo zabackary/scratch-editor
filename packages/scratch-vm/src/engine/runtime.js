@@ -9,6 +9,7 @@ const BlockType = require('../extension-support/block-type');
 const Profiler = require('./profiler');
 const Sequencer = require('./sequencer');
 const execute = require('./execute.js');
+const compilerExecute = require('../compiler/jsexecute');
 const ScratchBlocksConstants = require('./scratch-blocks-constants');
 const TargetType = require('../extension-support/target-type');
 const Thread = require('./thread');
@@ -19,6 +20,9 @@ const Variable = require('./variable');
 const xmlEscape = require('../util/xml-escape');
 const ScratchLinkWebSocket = require('../util/scratch-link-websocket');
 const fetchWithTimeout = require('../util/fetch-with-timeout');
+const platform = require('./tw-platform.js');
+const safeStringify = require('../util/tw-safe-stringify.js');
+const MonitorState = require('./tw-monitor-state.js');
 
 // Virtual I/O devices.
 const Clock = require('../io/clock');
@@ -47,8 +51,12 @@ const defaultBlockPackages = {
     scratch3_data: require('../blocks/scratch3_data'),
     scratch3_procedures: require('../blocks/scratch3_procedures')
 };
+const FrameLoop = require('./tw-frame-loop');
+const MonitorRecord = require('./monitor-record.js');
 
 const defaultExtensionColors = ['#0FBD8C', '#0DA57A', '#0B8E69'];
+
+const COMMENT_CONFIG_MAGIC = ' // _twconfig_';
 
 /**
  * Information used for converting Scratch argument types into scratch-blocks data.
@@ -150,11 +158,14 @@ const cloudDataManager = () => {
 
     const hasCloudVariables = () => count > 0;
 
+    const getNumberOfCloudVariables = () => count;
+
     return {
         canAddCloudVariable,
         addCloudVariable,
         removeCloudVariable,
-        hasCloudVariables
+        hasCloudVariables,
+        getNumberOfCloudVariables
     };
 };
 
@@ -203,6 +214,8 @@ class Runtime extends EventEmitter {
          */
         this.threads = [];
 
+        this.threadMap = new Map();
+
         /** @type {!Sequencer} */
         this.sequencer = new Sequencer(this);
 
@@ -248,6 +261,13 @@ class Runtime extends EventEmitter {
         this._hats = {};
 
         /**
+         * Map of opcode to information about whether the block's return value should be interpreted
+         * for control flow purposes.
+         * @type {Record<string, {conditional: boolean}>}
+         */
+        this._flowing = {};
+
+        /**
          * A list of script block IDs that were glowing during the previous frame.
          * @type {!Array.<!string>}
          */
@@ -287,14 +307,9 @@ class Runtime extends EventEmitter {
         this.monitorBlockInfo = {};
 
         /**
-         * Ordered map of all monitors, which are MonitorReporter objects.
+         * Ordered map of all monitors, which are MonitorRecord objects.
          */
-        this._monitorState = OrderedMap({});
-
-        /**
-         * Monitor state from last tick
-         */
-        this._prevMonitorState = OrderedMap({});
+        this._monitorState = new MonitorState();
 
         /**
          * Whether the project is in "turbo mode."
@@ -314,6 +329,11 @@ class Runtime extends EventEmitter {
          * @type {!number}
          */
         this._steppingInterval = null;
+
+        /**
+         * tw: Responsible for managing the VM's many timers.
+         */
+        this.frameLoop = new FrameLoop(this);
 
         /**
          * Current length of a step.
@@ -383,6 +403,12 @@ class Runtime extends EventEmitter {
         this.canAddCloudVariable = newCloudDataManager.canAddCloudVariable;
 
         /**
+         * A function which returns the number of cloud variables in the runtime.
+         * @returns {number}
+         */
+        this.getNumberOfCloudVariables = newCloudDataManager.getNumberOfCloudVariables;
+
+        /**
          * A function that tracks a new cloud variable in the runtime,
          * updating the cloud variable limit. Calling this function will
          * emit a cloud data update event if this is the first cloud variable
@@ -406,9 +432,18 @@ class Runtime extends EventEmitter {
          */
         this.origin = null;
 
+        /**
+         * Metadata about the platform this VM is part of.
+         */
+        this.platform = Object.assign({}, platform);
+
         this._initScratchLink();
 
         this.resetRunId();
+        this.compilerOptions = {
+            enabled: true,
+            warpTimer: false
+        };
     }
 
     /**
@@ -482,6 +517,49 @@ class Runtime extends EventEmitter {
      */
     static get TURBO_MODE_OFF () {
         return 'TURBO_MODE_OFF';
+    }
+
+    /**
+     * Event name for runtime options changing.
+     * @constant {string}
+     */
+    static get RUNTIME_OPTIONS_CHANGED () {
+        return 'RUNTIME_OPTIONS_CHANGED';
+    }
+
+    /**
+     * Event name for compiler options changing.
+     * @constant {string}
+     */
+    static get COMPILER_OPTIONS_CHANGED () {
+        return 'COMPILER_OPTIONS_CHANGED';
+    }
+
+    /**
+     * Event name for compiler errors.
+     * @const {string}
+     */
+
+    /**
+     * Event name for compiler errors.
+     * @constant {string}
+     */
+    static get COMPILE_ERROR () {
+        return 'COMPILE_ERROR';
+    }
+
+    /**
+     * Event called before any block is executed.
+     */
+    static get BEFORE_EXECUTE () {
+        return 'BEFORE_EXECUTE';
+    }
+
+    /**
+     * Event called after every block in the project has been executed.
+     */
+    static get AFTER_EXECUTE () {
+        return 'AFTER_EXECUTE';
     }
 
     /**
@@ -718,6 +796,13 @@ class Runtime extends EventEmitter {
     }
 
     /**
+     * Event name when platform name inside a project does not match the runtime.
+     */
+    static get PLATFORM_MISMATCH () {
+        return 'PLATFORM_MISMATCH';
+    }
+
+    /**
      * How rapidly we try to step threads by default, in ms.
      */
     static get THREAD_STEP_INTERVAL () {
@@ -798,8 +883,14 @@ class Runtime extends EventEmitter {
                 if (packageObject.getMonitored) {
                     this.monitorBlockInfo = Object.assign({}, this.monitorBlockInfo, packageObject.getMonitored());
                 }
+
+                this.compilerRegisterExtension(packageName, packageObject);
             }
         }
+    }
+
+    compilerRegisterExtension (name, extensionObject) {
+        this[`ext_${name}`] = extensionObject;
     }
 
     getMonitorState () {
@@ -936,6 +1027,16 @@ class Runtime extends EventEmitter {
                         this._hats[opcode] = {
                             edgeActivated: blockInfo.isEdgeActivated,
                             restartExistingThreads: blockInfo.shouldRestartExistingThreads
+                        };
+                    } else if (blockInfo.blockType === BlockType.CONDITIONAL) {
+                        this._flowing[opcode] = {
+                            conditional: true,
+                            loop: false
+                        };
+                    } else if (blockInfo.blockType === BlockType.LOOP) {
+                        this._flowing[opcode] = {
+                            conditional: false,
+                            loop: true
                         };
                     }
                 }
@@ -1700,6 +1801,15 @@ class Runtime extends EventEmitter {
 
         thread.pushStack(id);
         this.threads.push(thread);
+        if (!thread.stackClick && !thread.updateMonitor) {
+            this.threadMap.set(thread.getId(), thread);
+        }
+
+        // tw: compile new threads. Do not attempt to compile monitor threads.
+        if (!(opts && opts.updateMonitor) && this.compilerOptions.enabled) {
+            thread.tryCompile();
+        }
+
         return thread;
     }
 
@@ -1728,6 +1838,13 @@ class Runtime extends EventEmitter {
         newThread.updateMonitor = thread.updateMonitor;
         newThread.blockContainer = thread.blockContainer;
         newThread.pushStack(thread.topBlock);
+        // tw: when a thread is restarted, we have to check whether the previous script was attempted to be compiled.
+        if (thread.triedToCompile && this.compilerOptions.enabled) {
+            newThread.tryCompile();
+        }
+        if (!newThread.stackClick && !newThread.updateMonitor) {
+            this.threadMap.set(newThread.getId(), newThread);
+        }
         const i = this.threads.indexOf(thread);
         if (i > -1) {
             this.threads[i] = newThread;
@@ -1735,6 +1852,10 @@ class Runtime extends EventEmitter {
         }
         this.threads.push(thread);
         return thread;
+    }
+
+    emitCompileError (target, error) {
+        this.emit(Runtime.COMPILE_ERROR, target, error);
     }
 
     /**
@@ -1874,6 +1995,10 @@ class Runtime extends EventEmitter {
             optMatchFields[opts] = optMatchFields[opts].toUpperCase();
         }
 
+        // tw: By assuming that all new threads will not interfere with eachother, we can optimize the loops
+        // inside the allScriptsByOpcodeDo callback below.
+        const startingThreadListLength = this.threads.length;
+
         // Consider all scripts, looking for hats with opcode `requestedHatOpcode`.
         this.allScriptsByOpcodeDo(requestedHatOpcode, (script, target) => {
             const {
@@ -1896,19 +2021,15 @@ class Runtime extends EventEmitter {
             if (hatMeta.restartExistingThreads) {
                 // If `restartExistingThreads` is true, we should stop
                 // any existing threads starting with the top block.
-                for (let i = 0; i < this.threads.length; i++) {
-                    if (this.threads[i].target === target &&
-                        this.threads[i].topBlock === topBlockId &&
-                        // stack click threads and hat threads can coexist
-                        !this.threads[i].stackClick) {
-                        newThreads.push(this._restartThread(this.threads[i]));
-                        return;
-                    }
+                const existingThread = this.threadMap.get(Thread.getIdFromTargetAndBlock(target, topBlockId));
+                if (existingThread) {
+                    newThreads.push(this._restartThread(existingThread));
+                    return;
                 }
             } else {
                 // If `restartExistingThreads` is false, we should
                 // give up if any threads with the top block are running.
-                for (let j = 0; j < this.threads.length; j++) {
+                for (let j = 0; j < startingThreadListLength; j++) {
                     if (this.threads[j].target === target &&
                         this.threads[j].topBlock === topBlockId &&
                         // stack click threads and hat threads can coexist
@@ -1925,8 +2046,18 @@ class Runtime extends EventEmitter {
         // For compatibility with Scratch 2, edge triggered hats need to be processed before
         // threads are stepped. See ScratchRuntime.as for original implementation
         newThreads.forEach(thread => {
-            execute(this.sequencer, thread);
-            thread.goToNextBlock();
+            if (thread.isCompiled) {
+                if (thread.executableHat) {
+                    // It is quite likely that we are currently executing a block, so make sure
+                    // that we leave the compiler's state intact at the end.
+                    compilerExecute.saveGlobalState();
+                    compilerExecute(thread);
+                    compilerExecute.restoreGlobalState();
+                }
+            } else {
+                execute(this.sequencer, thread);
+                thread.goToNextBlock();
+            }
         });
         return newThreads;
     }
@@ -1943,7 +2074,11 @@ class Runtime extends EventEmitter {
         });
 
         this.targets.map(this.disposeTarget, this);
-        this._monitorState = OrderedMap({});
+        // tw: explicitly emit a MONITORS_UPDATE instead of relying on implicit behavior of _step()
+        if (!this._monitorState.empty()) {
+            this._monitorState = new MonitorState();
+            this.emit(Runtime.MONITORS_UPDATE, this._monitorState.shallowClone());
+        }
         this.emit(Runtime.RUNTIME_DISPOSED);
         this.ioDevices.clock.resetProjectTimer();
         // @todo clear out extensions? turboMode? etc.
@@ -1963,6 +2098,7 @@ class Runtime extends EventEmitter {
         const newCloudDataManager = cloudDataManager();
         this.hasCloudData = newCloudDataManager.hasCloudVariables;
         this.canAddCloudVariable = newCloudDataManager.canAddCloudVariable;
+        this.getNumberOfCloudVariables = newCloudDataManager.getNumberOfCloudVariables;
         this.addCloudVariable = this._initializeAddCloudVariable(newCloudDataManager);
         this.removeCloudVariable = this._initializeRemoveCloudVariable(newCloudDataManager);
     }
@@ -1976,6 +2112,9 @@ class Runtime extends EventEmitter {
     addTarget (target) {
         this.targets.push(target);
         this.executableTargets.push(target);
+        if (target.isStage && !this._stageTarget) {
+            this._stageTarget = target;
+        }
     }
 
     /**
@@ -2042,6 +2181,9 @@ class Runtime extends EventEmitter {
             // Remove from list of targets.
             return false;
         });
+        if (this._stageTarget === disposingTarget) {
+            this._stageTarget = null;
+        }
     }
 
     /**
@@ -2083,6 +2225,7 @@ class Runtime extends EventEmitter {
     greenFlag () {
         this.stopAll();
         this.emit(Runtime.PROJECT_START);
+        this.updateCurrentMSecs();
         this.ioDevices.clock.resetProjectTimer();
         this.targets.forEach(target => target.clearEdgeActivatedValues());
         // Inform all targets of the green flag.
@@ -2117,8 +2260,18 @@ class Runtime extends EventEmitter {
         }
         // Remove all remaining threads from executing in the next tick.
         this.threads = [];
+        this.threadMap.clear();
 
         this.resetRunId();
+    }
+
+    updateThreadMap () {
+        this.threadMap.clear();
+        for (const thread of this.threads) {
+            if (!thread.stackClick && !thread.updateMonitor) {
+                this.threadMap.set(thread.getId(), thread);
+            }
+        }
     }
 
     /**
@@ -2135,6 +2288,7 @@ class Runtime extends EventEmitter {
 
         // Clean up threads that were told to stop during or since the last step
         this.threads = this.threads.filter(thread => !thread.isKilled);
+        this.updateThreadMap();
 
         // Find all edge-activated hats, and add them to threads to be evaluated.
         for (const hatType in this._hats) {
@@ -2152,9 +2306,11 @@ class Runtime extends EventEmitter {
             }
             this.profiler.start(stepThreadsProfilerId);
         }
+        this.emit(Runtime.BEFORE_EXECUTE);
         const doneThreads = this.sequencer.stepThreads();
         if (this.profiler !== null) {
             this.profiler.stop();
+        this.emit(Runtime.AFTER_EXECUTE);
         }
         this._updateGlows(doneThreads);
         // Add done threads so that even if a thread finishes within 1 frame, the green
@@ -2184,9 +2340,9 @@ class Runtime extends EventEmitter {
             this._refreshTargets = false;
         }
 
-        if (!this._prevMonitorState.equals(this._monitorState)) {
-            this.emit(Runtime.MONITORS_UPDATE, this._monitorState);
-            this._prevMonitorState = this._monitorState;
+        if (this._monitorState.dirty) {
+            this.emit(Runtime.MONITORS_UPDATE, this._monitorState.shallowClone());
+            this._monitorState.dirty = false;
         }
 
         if (this.profiler !== null) {
@@ -2237,12 +2393,48 @@ class Runtime extends EventEmitter {
      * @param {boolean} compatibilityModeOn True iff in compatibility mode.
      */
     setCompatibilityMode (compatibilityModeOn) {
-        this.compatibilityMode = compatibilityModeOn;
-        if (this._steppingInterval) {
-            clearInterval(this._steppingInterval);
-            this._steppingInterval = null;
-            this.start();
+
+    /**
+     * tw: Update compiler options
+     * @param {*} compilerOptions New options
+     */
+    setCompilerOptions (compilerOptions) {
+        this.compilerOptions = Object.assign({}, this.compilerOptions, compilerOptions);
+        this.resetAllCaches();
+        this.emit(Runtime.COMPILER_OPTIONS_CHANGED, this.compilerOptions);
+    }
+
+    /**
+     * tw: Reset the cache of all block containers.
+     */
+    resetAllCaches () {
+        for (const target of this.targets) {
+            if (target.isOriginal) {
+                target.blocks.resetCache();
+            }
         }
+        this.flyoutBlocks.resetCache();
+        this.monitorBlocks.resetCache();
+    }
+
+    /**
+     * Eagerly (re)compile all scripts within this project.
+     */
+    precompile () {
+        this.allScriptsDo((topBlockId, target) => {
+            const topBlock = target.blocks.getBlock(topBlockId);
+            if (this.getIsHat(topBlock.opcode)) {
+                const thread = new Thread(topBlockId);
+                thread.target = target;
+                thread.blockContainer = target.blocks;
+                thread.tryCompile();
+            }
+        });
+    }
+
+    enableDebug () {
+        this.resetAllCaches();
+        this.debug = true;
     }
 
     /**
@@ -2375,44 +2567,43 @@ class Runtime extends EventEmitter {
 
     /**
      * Emit value for reporter to show in the blocks.
+     * @param {Target} target The target that the block was run in.
      * @param {string} blockId ID for the block.
      * @param {string} value Value to show associated with the block.
      */
-    visualReport (blockId, value) {
-        this.emit(Runtime.VISUAL_REPORT, {id: blockId, value: String(value)});
+    visualReport (target, blockId, value) {
+        if (target === this.getEditingTarget()) {
+            this.emit(Runtime.VISUAL_REPORT, {
+                id: blockId,
+                value: safeStringify(value)
+            });
+        }
     }
 
     /**
      * Add a monitor to the state. If the monitor already exists in the state,
      * updates those properties that are defined in the given monitor record.
-     * @param {!MonitorRecord} monitor Monitor to add.
+     * @param {import('./monitor-record.js')} monitor Monitor to add.
      */
     requestAddMonitor (monitor) {
-        const id = monitor.get('id');
         if (!this.requestUpdateMonitor(monitor)) { // update monitor if it exists in the state
             // if the monitor did not exist in the state, add it
-            this._monitorState = this._monitorState.set(id, monitor);
+            this._monitorState.set(monitor.id, monitor);
         }
     }
 
     /**
      * Update a monitor in the state and report success/failure of update.
-     * @param {!Map} monitor Monitor values to update. Values on the monitor with overwrite
-     *     values on the old monitor with the same ID. If a value isn't defined on the new monitor,
+     * @param {import('./monitor-record.js').ExternalDelta} delta Monitor values to update. Values on the monitor will
+     *     overwrite values on the old monitor with the same ID. If a value isn't defined on the new monitor,
      *     the old monitor will keep its old value.
-     * @returns {boolean} true if monitor exists in the state and was updated, false if it did not exist.
+     * @return {boolean} true if monitor exists in the state and was updated, false if it did not exist.
      */
-    requestUpdateMonitor (monitor) {
-        const id = monitor.get('id');
+    requestUpdateMonitor (delta) {
+        delta = MonitorRecord.externalDeltaToJS(delta);
+        const id = delta.id;
         if (this._monitorState.has(id)) {
-            this._monitorState =
-                // Use mergeWith here to prevent undefined values from overwriting existing ones
-                this._monitorState.set(id, this._monitorState.get(id).mergeWith((prev, next) => {
-                    if (typeof next === 'undefined' || next === null) {
-                        return prev;
-                    }
-                    return next;
-                }, monitor));
+            this._monitorState.set(id, delta);
             return true;
         }
         return false;
@@ -2424,32 +2615,32 @@ class Runtime extends EventEmitter {
      * @param {!string} monitorId ID of the monitor to remove.
      */
     requestRemoveMonitor (monitorId) {
-        this._monitorState = this._monitorState.delete(monitorId);
+        this._monitorState.delete(monitorId);
     }
 
     /**
      * Hides a monitor and returns success/failure of action.
      * @param {!string} monitorId ID of the monitor to hide.
-     * @returns {boolean} true if monitor exists and was updated, false otherwise
+     * @return {boolean} true if monitor exists and was updated, false otherwise
      */
     requestHideMonitor (monitorId) {
-        return this.requestUpdateMonitor(new Map([
-            ['id', monitorId],
-            ['visible', false]
-        ]));
+        return this.requestUpdateMonitor({
+            id: monitorId,
+            visible: false
+        });
     }
 
     /**
      * Shows a monitor and returns success/failure of action.
      * not exist in the state.
      * @param {!string} monitorId ID of the monitor to show.
-     * @returns {boolean} true if monitor exists and was updated, false otherwise
+     * @return {boolean} true if monitor exists and was updated, false otherwise
      */
     requestShowMonitor (monitorId) {
-        return this.requestUpdateMonitor(new Map([
-            ['id', monitorId],
-            ['visible', true]
-        ]));
+        return this.requestUpdateMonitor({
+            id: monitorId,
+            visible: true
+        });
     }
 
     /**
@@ -2458,7 +2649,7 @@ class Runtime extends EventEmitter {
      * @param {!string} targetId Remove all monitors with given target ID.
      */
     requestRemoveMonitorByTargetId (targetId) {
-        this._monitorState = this._monitorState.filterNot(value => value.targetId === targetId);
+        this._monitorState.filter(value => value.targetId !== targetId);
     }
 
     /**
@@ -2665,16 +2856,8 @@ class Runtime extends EventEmitter {
      */
     start () {
         // Do not start if we are already running
-        if (this._steppingInterval) return;
-
-        let interval = Runtime.THREAD_STEP_INTERVAL;
-        if (this.compatibilityMode) {
-            interval = Runtime.THREAD_STEP_INTERVAL_COMPATIBILITY;
-        }
-        this.currentStepTime = interval;
-        this._steppingInterval = setInterval(() => {
-            this._step();
-        }, interval);
+        if (this.frameLoop.running) return;
+        this.frameLoop.start();
         this.emit(Runtime.RUNTIME_STARTED);
     }
 
@@ -2683,8 +2866,11 @@ class Runtime extends EventEmitter {
      * Do not use the runtime after calling this method. This method is meant for test shutdown.
      */
     quit () {
-        clearInterval(this._steppingInterval);
-        this._steppingInterval = null;
+        if (!this.frameLoop.running) {
+            return;
+        }
+        this.frameLoop.stop();
+        this.emit(Runtime.RUNTIME_STOPPED);
     }
 
     /**

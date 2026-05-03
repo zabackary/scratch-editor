@@ -61,6 +61,13 @@ class _StackFrame {
          * @type {object}
          */
         this.executionContext = null;
+
+        /**
+         * Internal block object being executed. This is *not* the same as the object found
+         * in target.blocks.
+         * @type {object}
+         */
+        this.op = null;
     }
 
     /**
@@ -187,6 +194,25 @@ class Thread {
         this.warpTimer = null;
 
         this.justReported = null;
+
+        this.triedToCompile = false;
+
+        this.isCompiled = false;
+
+        // compiler data
+        // these values only make sense if isCompiled == true
+        this.timer = null;
+        /**
+         * The thread's generator.
+         * @type {Generator}
+         */
+        this.generator = null;
+        /**
+         * @type {Object.<string, import('../compiler/compile').CompiledScript>}
+         */
+        this.procedures = null;
+        this.executableHat = false;
+        this.compatibilityStackFrame = null;
     }
 
     /**
@@ -196,7 +222,7 @@ class Thread {
      * @constant
      */
     static get STATUS_RUNNING () {
-        return 0;
+        return 0; // used by compiler
     }
 
     /**
@@ -205,7 +231,7 @@ class Thread {
      * @constant
      */
     static get STATUS_PROMISE_WAIT () {
-        return 1;
+        return 1; // used by compiler
     }
 
     /**
@@ -213,7 +239,7 @@ class Thread {
      * @constant
      */
     static get STATUS_YIELD () {
-        return 2;
+        return 2; // used by compiler
     }
 
     /**
@@ -399,6 +425,72 @@ class Thread {
         }
         return false;
     }
+
+    /**
+     * Attempt to compile this thread.
+     */
+    tryCompile () {
+        if (!this.blockContainer) {
+            return;
+        }
+
+        // importing the compiler here avoids circular dependency issues
+        const compile = require('../compiler/compile');
+
+        this.triedToCompile = true;
+
+        // stackClick === true disables hat block generation
+        // It would be great to cache these separately, but for now it's easiest to just disable them to avoid
+        // cached versions of scripts breaking projects.
+        const canCache = !this.stackClick;
+
+        const topBlock = this.topBlock;
+        // Flyout blocks are stored in a special block container.
+        const blocks = this.blockContainer.getBlock(topBlock) ? this.blockContainer : this.target.runtime.flyoutBlocks;
+        const cachedResult = canCache && blocks.getCachedCompileResult(topBlock);
+        // If there is a cached error, do not attempt to recompile.
+        if (cachedResult && !cachedResult.success) {
+            return;
+        }
+
+        let result;
+        if (cachedResult) {
+            result = cachedResult.value;
+        } else {
+            try {
+                result = compile(this);
+                if (canCache) {
+                    blocks.cacheCompileResult(topBlock, result);
+                }
+            } catch (error) {
+                log.error('cannot compile script', this.target.getName(), error);
+                if (canCache) {
+                    blocks.cacheCompileError(topBlock, error);
+                }
+                this.target.runtime.emitCompileError(this.target, error);
+                return;
+            }
+        }
+
+        this.procedures = {};
+        for (const procedureCode of Object.keys(result.procedures)) {
+            this.procedures[procedureCode] = result.procedures[procedureCode](this);
+        }
+
+        this.generator = result.startingFunction(this)();
+
+        this.executableHat = result.executableHat;
+
+        if (!this.blockContainer.forceNoGlow) {
+            this.blockGlowInFrame = this.topBlock;
+            this.requestScriptGlowInFrame = true;
+        }
+
+        this.isCompiled = true;
+    }
 }
+
+// for extensions
+Thread._StackFrame = _StackFrame;
 
 module.exports = Thread;

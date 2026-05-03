@@ -56,6 +56,8 @@ const handleReport = function (resolvedValue, sequencer, thread, blockCached, la
     const currentBlockId = blockCached.id;
     const opcode = blockCached.opcode;
     const isHat = blockCached._isHat;
+    const isConditional = blockCached._isConditional;
+    const isLoop = blockCached._isLoop;
 
     thread.pushReportedValue(resolvedValue);
     if (isHat) {
@@ -81,6 +83,8 @@ const handleReport = function (resolvedValue, sequencer, thread, blockCached, la
             // if predicate was false.
             sequencer.retireThread(thread);
         }
+    } else if ((isConditional || isLoop) && typeof resolvedValue !== 'undefined') {
+        sequencer.stepToBranch(thread, cast.toNumber(resolvedValue), isLoop);
     } else {
         // In a non-hat, report the value visually if necessary if
         // at the top of the thread stack.
