@@ -84,6 +84,7 @@ class _StackFrame {
         this.waitingReporter = null;
         this.params = null;
         this.executionContext = null;
+        this.op = null;
 
         return this;
     }
@@ -248,7 +249,7 @@ class Thread {
      * @constant
      */
     static get STATUS_YIELD_TICK () {
-        return 3;
+        return 3; // used by compiler
     }
 
     /**
@@ -257,7 +258,21 @@ class Thread {
      * @constant
      */
     static get STATUS_DONE () {
-        return 4;
+        return 4; // used by compiler
+    }
+
+    /**
+     * @param {Target} target The target running the thread.
+     * @param {string} topBlock ID of the thread's top block.
+     * @returns {string} A unique ID for this target and thread.
+     */
+    static getIdFromTargetAndBlock (target, topBlock) {
+        // & should never appear in any IDs, so we can use it as a separator
+        return `${target.id}&${topBlock}`;
+    }
+
+    getId () {
+        return Thread.getIdFromTargetAndBlock(this.target, this.topBlock);
     }
 
     /**
@@ -300,9 +315,22 @@ class Thread {
         let blockID = this.peekStack();
         while (blockID !== null) {
             const block = this.target.blocks.getBlock(blockID);
-            if (typeof block !== 'undefined' && block.opcode === 'procedures_call') {
+
+            // Reporter form of procedures_call
+            if (this.peekStackFrame().waitingReporter) {
                 break;
             }
+
+            // Command form of procedures_call
+            if (typeof block !== 'undefined' && block.opcode === 'procedures_call') {
+                // By definition, if we get here, the procedure is done, so skip ahead so
+                // the arguments won't be re-evaluated and then discarded as frozen state
+                // about which arguments have been evaluated is lost.
+                // This fixes https://github.com/TurboWarp/scratch-vm/issues/201
+                this.goToNextBlock();
+                break;
+            }
+
             this.popStack();
             blockID = this.peekStack();
         }
