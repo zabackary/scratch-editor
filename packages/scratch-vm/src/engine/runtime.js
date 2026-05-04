@@ -2310,7 +2310,7 @@ class Runtime extends EventEmitter {
         const doneThreads = this.sequencer.stepThreads();
         if (this.profiler !== null) {
             this.profiler.stop();
-        this.emit(Runtime.AFTER_EXECUTE);
+            this.emit(Runtime.AFTER_EXECUTE);
         }
         this._updateGlows(doneThreads);
         // Add done threads so that even if a thread finishes within 1 frame, the green
@@ -2393,6 +2393,9 @@ class Runtime extends EventEmitter {
      * @param {boolean} compatibilityModeOn True iff in compatibility mode.
      */
     setCompatibilityMode (compatibilityModeOn) {
+        this.compatibilityMode = compatibilityModeOn;
+        this.resetAllCaches();
+    }
 
     /**
      * tw: Update compiler options
