@@ -65,6 +65,7 @@
     "@vernier/godirect": "1.8.3",
     "arraybuffer-loader": "1.0.8",
     "atob": "2.1.2",
+    "binaryen": "^129.0.0",
     "btoa": "1.2.1",
     "canvas-toBlob": "1.0.0",
     "decode-html": "2.0.0",
