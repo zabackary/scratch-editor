@@ -5,7 +5,6 @@ const {IROptimizer} = require('./iroptimizer');
 const {compileWithFallback, WASM_GENERATOR} = require('./wasm-integration.js');
 
 const compile = (/** @type {import("../engine/thread")} */ thread) => {
-    console.info('yay');
     const irGenerator = new IRGenerator(thread);
     const ir = irGenerator.generate();
 

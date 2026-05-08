@@ -1,7 +1,7 @@
 // @ts-check
 
 /**
- * @fileoverview Integration point for WASM generator with runtime
+ * @file Integration point for WASM generator with runtime
  *
  * This module shows how to integrate the WASM generator with the Scratch runtime.
  * Currently, this is a placeholder - full integration will require modifying the
@@ -13,7 +13,6 @@ const JSGenerator = require('./jsgen.js');
 
 /**
  * Try to compile a script with WASM, falling back to JS on error.
- *
  * @param {import("./intermediate.js").IntermediateScript} script The IntermediateScript
  * @param {import("./intermediate.js").IntermediateRepresentation} ir The IntermediateRepresentation
  * @param {import("../sprites/rendered-target.js")} target The sprite target
@@ -26,6 +25,7 @@ const compileWithFallback = (script, ir, target, useWasm = true) => {
             const wasmGen = new WasmGenerator(script, ir, target);
             return wasmGen.compile();
         } catch (err) {
+            throw err; // TODO: remove this
             console.warn(`WASM compilation failed, falling back to JS: ${err.message}`);
         }
     }

@@ -537,7 +537,7 @@ class Runtime extends EventEmitter {
 
     /**
      * Event name for compiler errors.
-     * @const {string}
+     * @constant {string}
      */
 
     /**
@@ -1534,8 +1534,7 @@ class Runtime extends EventEmitter {
 
             return {
                 id: categoryInfo.id,
-                xml: `<category name="${name}" toolboxitemid="${categoryInfo.id}" ${statusButtonXML} ${colorXML} ${
-                    menuIconXML}>${paletteBlocks.map(block => block.xml).join('')}</category>`
+                xml: `<category name="${name}" toolboxitemid="${categoryInfo.id}" ${statusButtonXML} ${colorXML} ${menuIconXML}>${paletteBlocks.map(block => block.xml).join('')}</category>`
             };
         });
     }
@@ -1927,7 +1926,7 @@ class Runtime extends EventEmitter {
         for (let i = 0; i < this.threads.length; i++) {
             // Don't re-add the script if it's already running
             if (this.threads[i].topBlock === topBlockId && this.threads[i].status !== Thread.STATUS_DONE &&
-                    this.threads[i].updateMonitor) {
+                this.threads[i].updateMonitor) {
                 return;
             }
         }
@@ -2317,7 +2316,7 @@ class Runtime extends EventEmitter {
         // flag will still indicate that a script ran.
         this._emitProjectRunStatus(
             this.threads.length + doneThreads.length -
-                this._getMonitorThreadCount([...this.threads, ...doneThreads]));
+            this._getMonitorThreadCount([...this.threads, ...doneThreads]));
         // Store threads that completed this iteration for testing and other
         // internal purposes.
         this._lastStepDoneThreads = doneThreads;
@@ -2600,7 +2599,7 @@ class Runtime extends EventEmitter {
      * @param {import('./monitor-record.js').ExternalDelta} delta Monitor values to update. Values on the monitor will
      *     overwrite values on the old monitor with the same ID. If a value isn't defined on the new monitor,
      *     the old monitor will keep its old value.
-     * @return {boolean} true if monitor exists in the state and was updated, false if it did not exist.
+     * @returns {boolean} true if monitor exists in the state and was updated, false if it did not exist.
      */
     requestUpdateMonitor (delta) {
         delta = MonitorRecord.externalDeltaToJS(delta);
@@ -2624,7 +2623,7 @@ class Runtime extends EventEmitter {
     /**
      * Hides a monitor and returns success/failure of action.
      * @param {!string} monitorId ID of the monitor to hide.
-     * @return {boolean} true if monitor exists and was updated, false otherwise
+     * @returns {boolean} true if monitor exists and was updated, false otherwise
      */
     requestHideMonitor (monitorId) {
         return this.requestUpdateMonitor({
@@ -2637,7 +2636,7 @@ class Runtime extends EventEmitter {
      * Shows a monitor and returns success/failure of action.
      * not exist in the state.
      * @param {!string} monitorId ID of the monitor to show.
-     * @return {boolean} true if monitor exists and was updated, false otherwise
+     * @returns {boolean} true if monitor exists and was updated, false otherwise
      */
     requestShowMonitor (monitorId) {
         return this.requestUpdateMonitor({

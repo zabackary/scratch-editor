@@ -9,7 +9,7 @@ const {StackOpcode, InputOpcode, InputType} = require('./enums.js');
 const {default: binaryen} = require('binaryen');
 
 // These imports are used by jsdoc comments but eslint doesn't know that
-/* eslint-disable no-unused-vars */
+ 
 const {
     IntermediateStackBlock,
     IntermediateInput,
@@ -17,13 +17,13 @@ const {
     IntermediateScript,
     IntermediateRepresentation
 } = require('./intermediate');
-/* eslint-enable no-unused-vars */
+ 
 
 /**
- * @fileoverview Convert intermediate representations to JavaScript functions.
+ * @file Convert intermediate representations to JavaScript functions.
  */
 
-/* eslint-disable max-len */
+ 
 /* eslint-disable prefer-template */
 
 const sanitize = string => {
@@ -123,12 +123,9 @@ class JSGenerator {
         this.descendedIntoModulo = false;
         this.isInHat = false;
 
-        this.debug = this.target.runtime.debug;
+        this.debug = this.target.runtime.debug || true; // TODO: remove the `|| true` after testing
 
-        /**
-         * The WASM module for this script.
-         */
-        this.wasmModule = new binaryen.Module();
+        this.source = '';
     }
 
     /**

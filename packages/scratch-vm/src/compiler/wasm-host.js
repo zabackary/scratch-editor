@@ -529,6 +529,50 @@ const createWasmHostImports = globalState => {
         return result;
     };
 
+    /**
+     * Execute a block from the compatibility layer using stored IR block data.
+     * @param {number} blockIndex Index into the compatibilityBlocks array
+     * @returns {unknown} The block's return value
+     */
+    imports.env.host_executeCompatBlock = blockIndex => {
+        const thread = globalState.thread;
+        const runtime = globalState.runtime;
+        const blockUtility = globalState.blockUtility;
+
+        // Retrieve the IR block from storage
+        const irBlock = globalState.compatibilityBlocks && globalState.compatibilityBlocks[blockIndex];
+        if (!irBlock) {
+            console.error(`WASM: Compatibility block ${blockIndex} not found`);
+            return;
+        }
+
+        // Get the opcode function from the runtime
+        const blockFunction = runtime.getOpcodeFunction(irBlock.opcode);
+        if (!blockFunction) {
+            console.error(`WASM: No opcode function for ${irBlock.opcode}`);
+            return;
+        }
+
+        // Compile the inputs object (shallow - just pass IR inputs directly for now)
+        // TODO: This will need to properly traverse IR inputs and compile them
+        const inputs = irBlock.inputs || {};
+
+        // Initialize block utility and execute
+        const blockId = irBlock.id || 'compat';
+        const stackFrame = {};
+        
+        blockUtility.init(thread, blockId, stackFrame);
+        const result = blockFunction(inputs, blockUtility);
+        
+        // Handle branching (for wait/loop blocks)
+        if (typeof result === 'undefined' && blockUtility._startedBranch) {
+            // Return the branch info for the scheduler to handle
+            return blockUtility._startedBranch[0];
+        }
+        
+        return result;
+    };
+
     // ============================================================================
     // MEMORY MANAGEMENT (for future string/large data support)
     // ============================================================================

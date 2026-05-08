@@ -4,10 +4,15 @@ const log = require('../util/log');
 const VariablePool = require('./variable-pool');
 const createWasmHostImports = require('./wasm-host');
 const {StackOpcode, InputOpcode, InputType} = require('./enums.js');
-const {default: binaryen} = require('binaryen');
 
-// These imports are used by jsdoc comments but eslint doesn't know that
-/* eslint-disable no-unused-vars */
+/** @type {import('binaryen').default} */
+let binaryen; // Will hold the loaded Binaryen module
+import('binaryen').then(module => {
+    // Binaryen is now loaded and can be used
+    binaryen = module.default;
+    log.info('Binaryen loaded successfully');
+});
+
 const {
     IntermediateStackBlock,
     IntermediateInput,
@@ -15,10 +20,10 @@ const {
     IntermediateScript,
     IntermediateRepresentation
 } = require('./intermediate');
-/* eslint-enable no-unused-vars */
+ 
 
 /**
- * @fileoverview Convert intermediate representations to WebAssembly modules.
+ * @file Convert intermediate representations to WebAssembly modules.
  *
  * This generator follows the same IR compilation pattern as JSGenerator
  * but emits Binaryen module building calls instead of JavaScript strings.
@@ -112,6 +117,12 @@ class WasmGenerator {
          * @type {Array<{type: string, value: unknown}>}
          */
         this.locals = [];
+
+        /**
+         * Array of compatibility blocks to pass to the factory function
+         * @type {Array<object>}
+         */
+        this.compatibilityBlocks = [];
     }
 
     /**
@@ -484,6 +495,17 @@ class WasmGenerator {
     }
 
     /**
+     * Allocate a reference to an IR block for compatibility layer execution.
+     * @param {IntermediateStackBlock} block The IR block
+     * @returns {number} Reference ID (index in compatibilityBlocks array)
+     */
+    allocateCompatibilityBlockReference (block) {
+        // Store the block and return its index
+        this.compatibilityBlocks.push(block);
+        return this.compatibilityBlocks.length - 1;
+    }
+
+    /**
      * Generate Binaryen code for a command block (stack block).
      * @param {IntermediateStackBlock} block Stack block to compile
      * @returns {number} Binaryen expression index
@@ -495,36 +517,11 @@ class WasmGenerator {
         case StackOpcode.NOP:
             return m.nop();
 
-        // ====== MOTION ======
-        case StackOpcode.MOTION_MOVESTEPS:
-        case StackOpcode.MOTION_TURNRIGHT:
-        case StackOpcode.MOTION_TURNLEFT:
-        case StackOpcode.MOTION_GOTOXY:
-        case StackOpcode.MOTION_GOTOX:
-        case StackOpcode.MOTION_GOTOY:
-        case StackOpcode.MOTION_IFLONEDGEBOUNCEBACK:
-        case StackOpcode.MOTION_SETROTATIONSTYLE:
-            // TODO: Delegate to compatibility layer
-            return this.generateCompatibilityLayerCall(block);
-
         // ====== LOOKS ======
         case StackOpcode.LOOKS_SAY:
-        case StackOpcode.LOOKS_SAYFORSECS:
         case StackOpcode.LOOKS_THINK:
-        case StackOpcode.LOOKS_THINKFORSECS:
         case StackOpcode.LOOKS_SHOW:
         case StackOpcode.LOOKS_HIDE:
-        case StackOpcode.LOOKS_SWITCHCOSTUMETO:
-        case StackOpcode.LOOKS_NEXTCOSTUME:
-        case StackOpcode.LOOKS_SWITCHBACKDROPTO:
-        case StackOpcode.LOOKS_NEXTBACKDROP:
-            // TODO: Delegate to compatibility layer
-            return this.generateCompatibilityLayerCall(block);
-
-        // ====== SOUND ======
-        case StackOpcode.SOUND_PLAY:
-        case StackOpcode.SOUND_PLAYUNTILDONE:
-        case StackOpcode.SOUND_STOP:
             // TODO: Delegate to compatibility layer
             return this.generateCompatibilityLayerCall(block);
 
@@ -553,27 +550,29 @@ class WasmGenerator {
             return this.generateCompatibilityLayerCall(block);
 
         // ====== DATA (VARIABLES & LISTS) ======
-        case StackOpcode.DATA_SETVARIABLETO:
+        case StackOpcode.VAR_SET:
+        case StackOpcode.VAR_SHOW:
+        case StackOpcode.VAR_HIDE:
             return this.generateSetVariable(block);
 
-        case StackOpcode.DATA_CHANGEVARIABLEBY:
-            return this.generateChangeVariable(block);
-
-        case StackOpcode.DATA_LISTAPPEND:
-        case StackOpcode.DATA_LISTREPLACEITEM:
-        case StackOpcode.DATA_LISTINSERTITEM:
-        case StackOpcode.DATA_LISTDELETEITEM:
+        case StackOpcode.LIST_ADD:
+        case StackOpcode.LIST_DELETE:
+        case StackOpcode.LIST_INSERT:
+        case StackOpcode.LIST_REPLACE:
+        case StackOpcode.LIST_DELETE_ALL:
+        case StackOpcode.LIST_SHOW:
+        case StackOpcode.LIST_HIDE:
             // TODO: List operations
             return this.generateCompatibilityLayerCall(block);
 
         // ====== EVENT ======
-        case StackOpcode.EVENT_BROADCASTANDWAIT:
+        case StackOpcode.EVENT_BROADCAST_AND_WAIT:
         case StackOpcode.EVENT_BROADCAST:
             // TODO: Handle broadcast with yielding
             return this.generateCompatibilityLayerCall(block);
 
         // ====== PROCEDURES ======
-        case StackOpcode.PROCEDURES_CALL:
+        case StackOpcode.PROCEDURE_CALL:
             return this.generateProcedureCall(block);
 
         default: {
@@ -588,13 +587,13 @@ class WasmGenerator {
 
     /**
      * Generate code for wait block.
-     * @param {IntermediateStackBlock} _block
+     * @param {IntermediateStackBlock} block
      * @returns {number} Binaryen expression
      */
-    generateWait () {
-        // TODO: Generate wait loop with yielding
-        const m = this.wasmModule;
-        return m.nop();
+    generateWait (block) {
+        // Delegate to compatibility layer for now
+        // TODO: Implement native wait with yielding protocol
+        return this.generateCompatibilityLayerCall(block);
     }
 
     /**
@@ -603,12 +602,9 @@ class WasmGenerator {
      * @returns {number} Binaryen expression
      */
     generateRepeat (block) {
-        // TODO: Generate repeat loop with yielding
-        const m = this.wasmModule;
-        if (block.inputs.stack) {
-            return this.descendStack(block.inputs.stack, new Frame(true));
-        }
-        return m.nop();
+        // Delegate to compatibility layer for proper yielding
+        // TODO: Implement native repeat loop with yield points
+        return this.generateCompatibilityLayerCall(block);
     }
 
     /**
@@ -617,12 +613,9 @@ class WasmGenerator {
      * @returns {number} Binaryen expression
      */
     generateWhile (block) {
-        // TODO: Generate while loop with condition and yielding
-        const m = this.wasmModule;
-        if (block.inputs.stack) {
-            return this.descendStack(block.inputs.stack, new Frame(true));
-        }
-        return m.nop();
+        // Delegate to compatibility layer for proper yielding
+        // TODO: Implement native while loop with condition and yield points
+        return this.generateCompatibilityLayerCall(block);
     }
 
     /**
@@ -631,12 +624,9 @@ class WasmGenerator {
      * @returns {number} Binaryen expression
      */
     generateFor (block) {
-        // TODO: Generate for loop with counter variable
-        const m = this.wasmModule;
-        if (block.inputs.stack) {
-            return this.descendStack(block.inputs.stack, new Frame(true));
-        }
-        return m.nop();
+        // Delegate to compatibility layer for proper yielding
+        // TODO: Implement native for loop with counter and yield points
+        return this.generateCompatibilityLayerCall(block);
     }
 
     /**
@@ -663,12 +653,13 @@ class WasmGenerator {
 
     /**
      * Generate code for wait until block.
+     * @param {IntermediateStackBlock} block
      * @returns {number} Binaryen expression
      */
-    generateWaitUntil () {
-        // TODO: Generate wait until loop with condition
-        const m = this.wasmModule;
-        return m.nop();
+    generateWaitUntil (block) {
+        // Delegate to compatibility layer for now
+        // TODO: Implement native wait until with condition checking and yielding
+        return this.generateCompatibilityLayerCall(block);
     }
 
     /**
@@ -677,44 +668,46 @@ class WasmGenerator {
      * @returns {number} Binaryen expression
      */
     generateSetVariable (block) {
-        const m = this.wasmModule;
-        const varRef = this.allocateVariableReference(block.inputs.variable.id);
-        const value = this.descendInput(block.inputs.value);
-        
-        return m.call('host_setVariableValue', [
-            m.call('host_getVariable', [m.i32.const(varRef)], binaryen.i32),
-            value
-        ], binaryen.none);
+        // Delegate to compatibility layer to handle variable lookups properly
+        // TODO: Implement direct variable set with proper reference handling
+        return this.generateCompatibilityLayerCall(block);
     }
 
     /**
      * Generate code for change variable block.
+     * @param {IntermediateStackBlock} block
      * @returns {number} Binaryen expression
      */
-    generateChangeVariable () {
-        // TODO: Get current value, add delta, set back
-        const m = this.wasmModule;
-        return m.nop();
+    generateChangeVariable (block) {
+        // Delegate to compatibility layer for proper variable handling
+        // TODO: Implement direct change with variable reference lookup
+        return this.generateCompatibilityLayerCall(block);
     }
 
     /**
      * Generate code for procedure call.
+     * @param {IntermediateStackBlock} block
      * @returns {number} Binaryen expression
      */
-    generateProcedureCall () {
-        // TODO: Call procedure function with proper arguments
-        const m = this.wasmModule;
-        return m.nop();
+    generateProcedureCall (block) {
+        // Delegate to compatibility layer for procedure lookup and execution
+        // TODO: Implement native procedure calls with proper argument passing
+        return this.generateCompatibilityLayerCall(block);
     }
 
     /**
      * Generate a compatibility layer call for unsupported blocks.
+     * @param {IntermediateStackBlock} block
      * @returns {number} Binaryen expression
      */
-    generateCompatibilityLayerCall () {
-        // TODO: Call host_executeCompat
+    generateCompatibilityLayerCall (block) {
         const m = this.wasmModule;
-        return m.nop();
+        
+        // Store the block data for the host to retrieve
+        const blockIndex = this.allocateCompatibilityBlockReference(block);
+        
+        // Call the host to execute the block via the compatibility layer
+        return m.call('host_executeCompatBlock', [m.i32.const(blockIndex)], binaryen.none);
     }
 
     /**
@@ -730,9 +723,9 @@ class WasmGenerator {
         this.pushFrame(frame);
 
         if (stack) {
-            for (let i = 0; i < stack.length; i++) {
-                const block = stack[i];
-                if (i === stack.length - 1) {
+            for (let i = 0; i < stack.blocks.length; i++) {
+                const block = stack.blocks[i];
+                if (i === stack.blocks.length - 1) {
                     frame.isLastBlock = true;
                 }
                 const expr = this.descendStackBlock(block);
@@ -795,13 +788,13 @@ class WasmGenerator {
         // Export the function
         m.addExport(funcName, funcName);
 
-        // Validate module - validate() returns 0 for invalid, 1 for valid
-        if (m.validate() === 0) {
-            throw new Error('Generated WASM module failed validation');
-        }
+        // // Validate module - validate() returns 0 for invalid, 1 for valid
+        // if (m.validate() === 0) {
+        //     throw new Error('Generated WASM module failed validation');
+        // }
 
-        // Optimize
-        m.optimize();
+        // // Optimize
+        // m.optimize();
 
         return m;
     }
@@ -849,9 +842,11 @@ class WasmGenerator {
             throw err;
         }
 
+        debugger;
+
         return function factory (thread) {
             const target = thread.target;
-            const _runtime = target.runtime;
+            const runtime = target.runtime;
             // TODO: Use stage for coordinate conversions
 
             // Create host imports with proper global state
@@ -860,7 +855,9 @@ class WasmGenerator {
                 Cast: require('../util/cast'),
                 log: require('../util/log'),
                 blockUtility: require('./compat-block-utility'),
-                thread: thread
+                thread: thread,
+                runtime: runtime,
+                compatibilityBlocks: self.compatibilityBlocks
             };
 
             const imports = createWasmHostImports(globalState);
