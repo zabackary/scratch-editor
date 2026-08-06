@@ -493,7 +493,6 @@ class Thread {
                     blocks.cacheCompileResult(topBlock, result);
                 }
             } catch (error) {
-                throw error; // TODO: remove this
                 log.error('cannot compile script', this.target.getName(), error);
                 if (canCache) {
                     blocks.cacheCompileError(topBlock, error);

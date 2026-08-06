@@ -6,7 +6,6 @@ const VariablePool = require('./variable-pool');
 const jsexecute = require('./jsexecute');
 const environment = require('./environment');
 const {StackOpcode, InputOpcode, InputType} = require('./enums.js');
-const {default: binaryen} = require('binaryen');
 
 // These imports are used by jsdoc comments but eslint doesn't know that
  

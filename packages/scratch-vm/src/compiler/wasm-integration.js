@@ -25,7 +25,6 @@ const compileWithFallback = (script, ir, target, useWasm = true) => {
             const wasmGen = new WasmGenerator(script, ir, target);
             return wasmGen.compile();
         } catch (err) {
-            throw err; // TODO: remove this
             console.warn(`WASM compilation failed, falling back to JS: ${err.message}`);
         }
     }
