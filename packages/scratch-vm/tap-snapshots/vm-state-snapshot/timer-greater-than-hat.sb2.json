@@ -86,6 +86,8 @@
       "params": {},
       "spriteName": null,
       "value": "",
+      "width": 0,
+      "height": 0,
       "x": 5,
       "y": 5,
       "visible": false,
