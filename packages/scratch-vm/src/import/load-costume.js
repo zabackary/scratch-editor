@@ -277,10 +277,7 @@ const handleCostumeLoadError = function (costume, runtime) {
     costume.asset = runtime.storage.get(costume.assetId);
     costume.md5 = `${costume.assetId}.${costume.asset.dataFormat}`;
 
-    const defaultCostumePromise = (isVector) ?
-        loadVector_(costume, runtime) : loadBitmap_(costume, runtime);
-
-    return defaultCostumePromise.then(loadedCostume => {
+    const attachBrokenInfo = loadedCostume => {
         loadedCostume.broken = {};
         loadedCostume.broken.assetId = oldAssetId;
         loadedCostume.broken.md5 = `${oldAssetId}.${oldDataFormat}`;
@@ -293,7 +290,17 @@ const handleCostumeLoadError = function (costume, runtime) {
         loadedCostume.broken.rotationCenterY = oldRotationY;
         loadedCostume.broken.bitmapResolution = oldBitmapResolution;
         return loadedCostume;
-    });
+    };
+
+    if (!runtime.renderer) {
+        log.warn('No rendering module present; cannot load default costume: ', costume.name);
+        return Promise.resolve(attachBrokenInfo(costume));
+    }
+
+    const defaultCostumePromise = (isVector) ?
+        loadVector_(costume, runtime) : loadBitmap_(costume, runtime);
+
+    return defaultCostumePromise.then(attachBrokenInfo);
 };
 
 /**
